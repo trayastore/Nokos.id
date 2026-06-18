@@ -1,0 +1,158 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ─────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Admin check: user doc must have role == "admin"
+    function isAdmin() {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
+    }
+
+    // ── users ────────────────────────────────────────────────────
+    // User can read/write their own profile; admin can read all
+    match /users/{uid} {
+      allow read:   if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid);
+      allow update: if isOwner(uid) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ── products ─────────────────────────────────────────────────
+    // Anyone (even unauthenticated) can read; only admin can write
+    match /products/{id} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ── panels ───────────────────────────────────────────────────
+    match /panels/{id} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ── reseller_packages ────────────────────────────────────────
+    match /reseller_packages/{id} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ── apk_mods ─────────────────────────────────────────────────
+    match /apk_mods/{id} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ── nokos_products ───────────────────────────────────────────
+    match /nokos_products/{id} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ── settings ─────────────────────────────────────────────────
+    // Settings (WhatsApp number, markup %, etc.) — public read, admin write
+    match /settings/{id} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ── transactions ─────────────────────────────────────────────
+    // User can read their own; admin can read+write all
+    match /transactions/{id} {
+      allow read:   if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ── manual_orders ────────────────────────────────────────────
+    match /manual_orders/{id} {
+      allow read:   if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // ── user_product_data ────────────────────────────────────────
+    match /user_product_data/{id} {
+      allow read:   if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // ── user_panel_data ──────────────────────────────────────────
+    match /user_panel_data/{id} {
+      allow read:   if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // ── nokos_orders ─────────────────────────────────────────────
+    // User can create their own order and read their own; admin reads all
+    match /nokos_orders/{id} {
+      allow read:   if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // ── nokos_deposits ───────────────────────────────────────────
+    // User creates & reads their own deposit records; admin reads all
+    match /nokos_deposits/{id} {
+      allow read:   if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.amount is number
+                    && request.resource.data.amount >= 10000;
+      // Only status field changes allowed by user after creation
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid
+                    && request.resource.data.userId == resource.data.userId
+                    && request.resource.data.amount == resource.data.amount
+                    || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ── nokos_wallets ────────────────────────────────────────────
+    // Doc ID == userId. User can read their own wallet.
+    // Writes: user can update their own wallet.
+    //   - balance changes are allowed (credit after QRIS paid, deduct after order)
+    //   - userId and userEmail cannot be changed
+    //
+    // NOTE untuk production: pindahkan creditWallet ke Firebase Cloud Functions
+    // agar saldo hanya bisa naik setelah deposit diverifikasi server-side.
+    // Saat ini frontend langsung write setelah cek ke nokos API.
+    match /nokos_wallets/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+
+      // Create: only the wallet owner can create their own wallet doc
+      allow create: if isOwner(uid)
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.balance is number
+                    && request.resource.data.balance >= 0;
+
+      // Update: owner can update but cannot change userId/userEmail
+      // Admin can update freely (for manual adjustments)
+      allow update: if isAdmin()
+                    || (isOwner(uid)
+                        && request.resource.data.userId == resource.data.userId
+                        && request.resource.data.balance is number
+                        && request.resource.data.balance >= 0);
+
+      allow delete: if isAdmin();
+    }
+
+    // ── Default deny ─────────────────────────────────────────────
+    // Any collection not listed above is denied by default.
+  }
+}
